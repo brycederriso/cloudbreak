@@ -44,12 +44,11 @@ public class ResourceObjectPermissionChecker implements PermissionChecker<CheckP
     }
 
     @Override
-    public <T extends Annotation> Object checkPermissions(T rawMethodAnnotation, AuthorizationResourceType resourceType, String userCrn,
+    public <T extends Annotation> void checkPermissions(T rawMethodAnnotation, AuthorizationResourceType resourceType, String userCrn,
             ProceedingJoinPoint proceedingJoinPoint, MethodSignature methodSignature, long startTime) {
         // check fields of resourceObject
         Object resourceObject = commonPermissionCheckingUtils.getParameter(proceedingJoinPoint, methodSignature, ResourceObject.class, Object.class);
         checkPermissionOnResourceObjectFields(userCrn, resourceObject);
-        return commonPermissionCheckingUtils.proceed(proceedingJoinPoint, methodSignature, startTime);
     }
 
     private void checkPermissionOnResourceObjectFields(String userCrn, Object resourceObject) {
