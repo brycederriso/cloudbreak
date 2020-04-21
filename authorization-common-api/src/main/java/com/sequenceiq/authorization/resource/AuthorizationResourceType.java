@@ -9,7 +9,8 @@ public enum AuthorizationResourceType {
     DATALAKE("datalake"),
     ENVIRONMENT("environments"),
     CREDENTIAL("credential"),
-    DATAHUB("datahub");
+    DATAHUB("datahub"),
+    IMAGE_CATALOG("imageCatalog");
 
     private final String resource;
 
