@@ -8,7 +8,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
 import javax.annotation.Nonnull;
 import javax.inject.Inject;
@@ -22,9 +21,10 @@ import com.sequenceiq.cloudbreak.api.endpoint.v4.stacks.response.StackV4Response
 import com.sequenceiq.cloudbreak.logger.MDCBuilder;
 import com.sequenceiq.periscope.domain.Cluster;
 import com.sequenceiq.periscope.domain.LoadAlert;
+import com.sequenceiq.periscope.domain.LoadAlertConfiguration;
+import com.sequenceiq.periscope.model.yarn.YarnScalingServiceV1Response;
 import com.sequenceiq.periscope.model.yarn.YarnScalingServiceV1Response.DecommissionCandidate;
 import com.sequenceiq.periscope.model.yarn.YarnScalingServiceV1Response.NewNodeManagerCandidates;
-import com.sequenceiq.periscope.model.yarn.YarnScalingServiceV1Response;
 import com.sequenceiq.periscope.monitor.client.YarnMetricsClient;
 import com.sequenceiq.periscope.monitor.context.ClusterIdEvaluatorContext;
 import com.sequenceiq.periscope.monitor.context.EvaluatorContext;
@@ -69,6 +69,10 @@ public class YarnLoadEvaluator extends EvaluatorExecutor {
 
     private LoadAlert loadAlert;
 
+    private LoadAlertConfiguration loadAlertConfiguration;
+
+    private String policyHostGroup;
+
     @Nonnull
     @Override
     public EvaluatorContext getContext() {
@@ -94,9 +98,10 @@ public class YarnLoadEvaluator extends EvaluatorExecutor {
             cluster = clusterService.findById(clusterId);
             stackCrn = cluster.getStackCrn();
             loadAlert = cluster.getLoadAlerts().stream().findFirst().get();
+            loadAlertConfiguration = loadAlert.getLoadAlertConfiguration();
+            policyHostGroup = loadAlert.getScalingPolicy().getHostGroup();
 
-            if (isCoolDownTimeElapsed(cluster.getStackCrn(),
-                    loadAlert.getLoadAlertConfiguration().getCoolDownMillis(),
+            if (isCoolDownTimeElapsed(cluster.getStackCrn(), loadAlertConfiguration.getCoolDownMillis(),
                     cluster.getLastScalingActivity())) {
                 pollYarnMetricsAndScaleCluster();
             }
@@ -109,73 +114,59 @@ public class YarnLoadEvaluator extends EvaluatorExecutor {
     }
 
     protected void pollYarnMetricsAndScaleCluster() throws Exception {
-
         StackV4Response stackV4Response = cloudbreakCommunicator.getByCrn(cluster.getStackCrn());
-
-        String hostGroupInstanceType =
-                stackResponseUtils.getHostGroupInstanceType(stackV4Response, loadAlert.getScalingPolicy().getHostGroup());
+        Map<String, String> hostFqdnsToInstanceId = stackResponseUtils.getCloudInstanceIdsForHostGroup(stackV4Response, policyHostGroup);
+        Set<String> hostGroupFqdns = hostFqdnsToInstanceId.keySet();
 
         YarnScalingServiceV1Response yarnResponse = yarnMetricsClient
-                .getYarnMetricsForCluster(cluster, hostGroupInstanceType, stackV4Response.getCloudPlatform());
+                .getYarnMetricsForCluster(cluster, policyHostGroup, hostFqdnsToInstanceId.keySet());
 
-        Map<String, String> hostFqdnsToInstanceId = stackResponseUtils
-                .getCloudInstanceIdsForHostGroup(stackV4Response, loadAlert.getScalingPolicy().getHostGroup());
-        yarnResponse.getScaleUpCandidates().ifPresentOrElse(
-                scaleUpCandidates -> handleScaleUp(hostGroupInstanceType, scaleUpCandidates, hostFqdnsToInstanceId.size()),
-                () -> {
-                    yarnResponse.getScaleDownCandidates().ifPresent(
-                            scaleDownCandidates -> handleScaleDown(scaleDownCandidates, hostFqdnsToInstanceId));
-                });
-    }
+        Integer existingHostGroupSize = hostFqdnsToInstanceId.size();
+        Integer maxAllowedScaleUp = loadAlertConfiguration.getMaxResourceValue() - existingHostGroupSize;
+        Integer maxAllowedScaleDown = Math.max(0, hostGroupFqdns.size() - loadAlertConfiguration.getMinResourceValue());
 
-    protected void handleScaleUp(String hostGroupInstanceType, NewNodeManagerCandidates newNMCandidates, Integer existingHostGroupSize) {
-        Integer yarnRecommendedHostGroupCount =
-                newNMCandidates.getCandidates().stream()
-                        .filter(candidate -> candidate.getModelName().equalsIgnoreCase(hostGroupInstanceType))
-                        .findFirst()
-                        .map(NewNodeManagerCandidates.Candidate::getCount)
-                        .orElseThrow(() -> new RuntimeException(String.format(
-                                "Yarn Scaling API Response does not contain recommended node count " +
-                                        " for hostGroupInstanceType '%s' in Cluster '%s', Yarn Response '%s'",
-                                hostGroupInstanceType, cluster.getStackCrn(), newNMCandidates)));
+        Integer yarnRecommendedUpscaleCount = yarnResponse.getScaleUpCandidates()
+                .map(NewNodeManagerCandidates::getCandidates).orElse(List.of()).stream()
+                .filter(candidate -> candidate.getModelName().equalsIgnoreCase(policyHostGroup))
+                .findFirst()
+                .map(NewNodeManagerCandidates.Candidate::getCount)
+                .map(scaleUpNodeCount -> Math.min(scaleUpNodeCount, DEFAULT_MAX_SCALE_UP_STEP_SIZE))
+                .map(scaleUpNodeCount -> Math.min(scaleUpNodeCount, maxAllowedScaleUp))
+                .orElse(0);
 
-        Integer maxAllowedScaleUp = Math.max(0, loadAlert.getLoadAlertConfiguration().getMaxResourceValue() - existingHostGroupSize);
-        Integer scaleUpCount = IntStream.of(yarnRecommendedHostGroupCount, DEFAULT_MAX_SCALE_UP_STEP_SIZE, maxAllowedScaleUp)
-                .min()
-                .getAsInt();
-
-        LOGGER.info("ScaleUp NodeCount '{}' for Cluster '{}', HostGroup '{}'", scaleUpCount,
-                cluster.getStackCrn(), loadAlert.getScalingPolicy().getHostGroup());
-
-        if (scaleUpCount > 0) {
-            ScalingEvent scalingEvent = new ScalingEvent(loadAlert);
-            scalingEvent.setHostGroupNodeCount(Optional.of(existingHostGroupSize));
-            scalingEvent.setScaleUpNodeCount(Optional.of(scaleUpCount));
-            eventPublisher.publishEvent(scalingEvent);
-        }
-    }
-
-    protected void handleScaleDown(List<DecommissionCandidate> decommissionCandidates, Map<String, String> hostGroupFqdnsToInstanceId) {
-        Set<String> hostGroupFqdns = hostGroupFqdnsToInstanceId.keySet();
-        int maxAllowedScaleDown = Math.max(0, hostGroupFqdns.size() - loadAlert.getLoadAlertConfiguration().getMinResourceValue());
-
-        List<String> decommissionHostGroupNodeIds = decommissionCandidates.stream()
+        List<String> yarnRecommendedDecommissionHosts = yarnResponse.getScaleDownCandidates().orElse(List.of()).stream()
                 .sorted(Comparator.comparingInt(DecommissionCandidate::getAmCount))
                 .map(DecommissionCandidate::getNodeId)
                 .map(nodeFqdn -> nodeFqdn.split(":")[0])
                 .filter(s -> hostGroupFqdns.contains(s))
                 .limit(maxAllowedScaleDown)
-                .map(nodeFqdn -> hostGroupFqdnsToInstanceId.get(nodeFqdn))
+                .map(nodeFqdn -> hostFqdnsToInstanceId.get(nodeFqdn))
                 .collect(Collectors.toList());
 
-        LOGGER.info("ScaleDown NodeCount '{}' for Cluster '{}', HostGroup '{}', NodeIds '{}'",
-                decommissionHostGroupNodeIds.size(), cluster.getStackCrn(), loadAlert.getScalingPolicy().getHostGroup(),
-                decommissionHostGroupNodeIds);
-
-        ScalingEvent scalingEvent = new ScalingEvent(loadAlert);
-        if (!decommissionHostGroupNodeIds.isEmpty()) {
-            scalingEvent.setDecommissionNodeIds(decommissionHostGroupNodeIds);
+        if (yarnRecommendedUpscaleCount > 0 && yarnRecommendedUpscaleCount <= maxAllowedScaleUp) {
+            ScalingEvent scalingEvent = new ScalingEvent(loadAlert);
+            scalingEvent.setHostGroupNodeCount(Optional.of(existingHostGroupSize));
+            scalingEvent.setScalingNodeCount(Optional.of(yarnRecommendedUpscaleCount));
             eventPublisher.publishEvent(scalingEvent);
+
+            LOGGER.info("ScaleUp NodeCount '{}' for Cluster '{}', HostGroup '{}'",
+                    yarnRecommendedUpscaleCount, cluster.getStackCrn(), policyHostGroup);
+        } else if (maxAllowedScaleDown > 0 && !yarnRecommendedDecommissionHosts.isEmpty()) {
+            ScalingEvent scalingEvent = new ScalingEvent(loadAlert);
+            scalingEvent.setDecommissionNodeIds(yarnRecommendedDecommissionHosts);
+            eventPublisher.publishEvent(scalingEvent);
+
+            LOGGER.info("ScaleDown NodeCount '{}' for Cluster '{}', HostGroup '{}', NodeIds '{}'",
+                    yarnRecommendedDecommissionHosts.size(), cluster.getStackCrn(), policyHostGroup,
+                    yarnRecommendedDecommissionHosts);
+        } else if (maxAllowedScaleUp < 0) {
+            ScalingEvent scalingEvent = new ScalingEvent(loadAlert);
+            scalingEvent.setHostGroupNodeCount(Optional.of(existingHostGroupSize));
+            scalingEvent.setScalingNodeCount(Optional.of(maxAllowedScaleUp));
+            eventPublisher.publishEvent(scalingEvent);
+
+            LOGGER.info("Forced ScaleDown NodeCount '{}' for Cluster '{}', HostGroup '{}'",
+                    maxAllowedScaleUp, cluster.getStackCrn(), policyHostGroup);
         }
     }
 }

@@ -37,6 +37,7 @@ public class StackResponseUtils {
         return stackResponse.getInstanceGroups().stream()
                 .filter(instanceGroupV4Response -> instanceGroupV4Response.getName().equalsIgnoreCase(hostGroup))
                 .flatMap(instanceGroupV4Response -> instanceGroupV4Response.getMetadata().stream())
+                .filter(instanceMetaData -> instanceMetaData.getDiscoveryFQDN() != null)
                 .collect(Collectors.toMap(InstanceMetaDataV4Response::getDiscoveryFQDN,
                         InstanceMetaDataV4Response::getInstanceId));
     }

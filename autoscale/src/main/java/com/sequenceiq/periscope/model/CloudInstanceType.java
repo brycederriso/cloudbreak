@@ -2,13 +2,21 @@ package com.sequenceiq.periscope.model;
 
 public class CloudInstanceType {
 
-    private static final Integer GB_TO_MB = 1024;
-
     private String instanceName;
 
     private Integer coreCPU;
 
-    private Float memoryInGB;
+    private Long memoryInMb;
+
+    public CloudInstanceType(String instanceName, Integer numCores, Long memoryInMb) {
+        this(numCores, memoryInMb);
+        this.instanceName = instanceName;
+    }
+
+    public CloudInstanceType(Integer numCores, Long memoryInMb) {
+        this.coreCPU = numCores;
+        this.memoryInMb = memoryInMb;
+    }
 
     public String getInstanceName() {
         return instanceName;
@@ -26,15 +34,7 @@ public class CloudInstanceType {
         this.coreCPU = coreCPU;
     }
 
-    public Float getMemoryInGB() {
-        return memoryInGB;
-    }
-
-    public void setMemoryInGB(Float memoryInGB) {
-        this.memoryInGB = memoryInGB;
-    }
-
-    public Integer getMemoryInMB() {
-        return Math.round(memoryInGB * GB_TO_MB);
+    public Long getMemoryInMB() {
+        return memoryInMb;
     }
 }

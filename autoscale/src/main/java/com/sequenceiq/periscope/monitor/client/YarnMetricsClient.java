@@ -2,6 +2,7 @@ package com.sequenceiq.periscope.monitor.client;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 import javax.inject.Inject;
 import javax.ws.rs.client.Client;
@@ -13,15 +14,14 @@ import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 
 import com.sequenceiq.cloudbreak.client.RestClientUtil;
-import com.sequenceiq.cloudbreak.common.mappable.CloudPlatform;
 import com.sequenceiq.periscope.aspects.RequestLogging;
 import com.sequenceiq.periscope.domain.Cluster;
 import com.sequenceiq.periscope.model.CloudInstanceType;
 import com.sequenceiq.periscope.model.TlsConfiguration;
-import com.sequenceiq.periscope.model.yarn.YarnScalingServiceV1Request.HostGroupInstanceType;
 import com.sequenceiq.periscope.model.yarn.YarnScalingServiceV1Request;
+import com.sequenceiq.periscope.model.yarn.YarnScalingServiceV1Request.HostGroupInstanceType;
 import com.sequenceiq.periscope.model.yarn.YarnScalingServiceV1Response;
-import com.sequenceiq.periscope.service.configuration.CloudInstanceTypeService;
+import com.sequenceiq.periscope.monitor.handler.ClouderaManagerCommunicator;
 import com.sequenceiq.periscope.service.configuration.ClusterProxyConfigurationService;
 import com.sequenceiq.periscope.service.security.TlsSecurityService;
 
@@ -37,6 +37,10 @@ public class YarnMetricsClient {
 
     private static final String DEFAULT_UPSCALE_RESOURCE_TYPE = "memory-mb";
 
+    private static final Integer DEFAULT_CLOUD_VM_NUM_CORES = 8;
+
+    private static final Long DEFAULT_CLOUD_VM_MEMORY_MB = 32000L;
+
     @Inject
     private TlsSecurityService tlsSecurityService;
 
@@ -44,14 +48,17 @@ public class YarnMetricsClient {
     private ClusterProxyConfigurationService clusterProxyConfigurationService;
 
     @Inject
-    private CloudInstanceTypeService cloudInstanceTypeService;
+    private ClouderaManagerCommunicator clouderaManagerCommunicator;
 
     @Inject
     private RequestLogging requestLogging;
 
+    private CloudInstanceType defaultCloudInstanceType = new CloudInstanceType(
+            "DefaultInstanceType", DEFAULT_CLOUD_VM_NUM_CORES, DEFAULT_CLOUD_VM_MEMORY_MB);
+
     public YarnScalingServiceV1Response getYarnMetricsForCluster(Cluster cluster,
-            String hostGroupInstanceType,
-            CloudPlatform cloudPlatform) throws Exception {
+            String hostGroup,
+            Set<String> hostGroupFqdns) throws Exception {
 
         TlsConfiguration tlsConfig = tlsSecurityService.getTls(cluster.getId());
         Optional<String> clusterProxyUrl = clusterProxyConfigurationService.getClusterProxyUrl();
@@ -66,13 +73,17 @@ public class YarnMetricsClient {
         String yarnApiUrl = String.format(YARN_API_URL, clusterProxyUrl.get(), cluster.getStackCrn());
         YarnScalingServiceV1Request yarnScalingServiceV1Request = new YarnScalingServiceV1Request();
 
-        CloudInstanceType cloudInstanceType = cloudInstanceTypeService.getCloudVMInstanceType(cloudPlatform, hostGroupInstanceType)
-                .orElseThrow(() -> new RuntimeException(String.format("CloudVmType not found for CloudPlatform %s, " +
-                        " InstanceType %s, Cluster %s ", cloudPlatform, hostGroupInstanceType, cluster.getStackCrn())));
+        CloudInstanceType cloudInstanceType = hostGroupFqdns.size() == 0 ? defaultCloudInstanceType : clouderaManagerCommunicator
+                .getCloudVMDetailsForHostGroup(cluster, hostGroup, hostGroupFqdns)
+                .orElseGet(() -> {
+                    LOGGER.debug("CloudVmSize could not be determined from CM for Cluster '{}', HostGroup '{}', HostGroupFqdnSize '{}'.",
+                            cluster.getStackCrn(), hostGroup, hostGroupFqdns.size());
+                    return defaultCloudInstanceType;
+                });
 
         yarnScalingServiceV1Request.setInstanceTypes(List.of(
                 new HostGroupInstanceType(cloudInstanceType.getInstanceName(),
-                        cloudInstanceType.getMemoryInMB(), cloudInstanceType.getCoreCPU())));
+                        cloudInstanceType.getMemoryInMB().intValue(), cloudInstanceType.getCoreCPU())));
 
         String clusterCreatorCrn = cluster.getClusterPertain().getUserCrn();
 
