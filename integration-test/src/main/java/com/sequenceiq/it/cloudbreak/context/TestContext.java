@@ -1,6 +1,8 @@
 package com.sequenceiq.it.cloudbreak.context;
 
 import static com.sequenceiq.it.cloudbreak.context.RunningParameter.emptyRunningParameter;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -56,6 +58,9 @@ import com.sequenceiq.it.cloudbreak.mock.DefaultModel;
 import com.sequenceiq.it.cloudbreak.util.ResponseUtil;
 import com.sequenceiq.it.cloudbreak.util.wait.WaitUtil;
 import com.sequenceiq.it.cloudbreak.util.wait.WaitUtilForMultipleStatuses;
+import com.sequenceiq.it.cloudbreak.util.wait.service.WaitService;
+import com.sequenceiq.it.cloudbreak.util.wait.service.environment.EnvironmentCreation;
+import com.sequenceiq.it.cloudbreak.util.wait.service.environment.EnvironmentWaitObject;
 import com.sequenceiq.sdx.api.model.SdxClusterStatusResponse;
 
 public abstract class TestContext implements ApplicationContextAware {
@@ -89,6 +94,9 @@ public abstract class TestContext implements ApplicationContextAware {
 
     @Inject
     private WaitUtil waitUtilSingleStatus;
+
+    @Inject
+    private WaitService<EnvironmentWaitObject> environmentWaitService;
 
     @Inject
     private TestParameter testParameter;
@@ -635,6 +643,47 @@ public abstract class TestContext implements ApplicationContextAware {
             EnvironmentClient environmentClient = getMicroserviceClient(EnvironmentClient.class, getWho(runningParameter).getAccessKey());
             String environmentName = awaitEntity.getResponse().getName();
             statuses.putAll(waitUtilSingleStatus.waitAndCheckStatuses(environmentClient, environmentName, desiredStatuses, pollingInterval));
+            if (!desiredStatuses.equals(EnvironmentStatus.ARCHIVED)) {
+                awaitEntity.refresh(getTestContext(), null);
+            }
+        } catch (Exception e) {
+            if (runningParameter.isLogError()) {
+                LOGGER.error("await [{}] is failed for statuses {}: {}, name: {}", entity, desiredStatuses, ResponseUtil.getErrorMessage(e), entity.getName());
+                Log.await(null, String.format("[%s] is failed for statuses %s: %s, name: %s",
+                        entity, desiredStatuses, ResponseUtil.getErrorMessage(e), entity.getName()));
+            }
+            getExceptionMap().put("await " + entity + " for desired statuses " + desiredStatuses, e);
+        }
+        return entity;
+    }
+
+    public EnvironmentTestDto awaitNew(EnvironmentTestDto entity, EnvironmentStatus desiredStatuses,
+            RunningParameter runningParameter) {
+        return awaitNew(entity, desiredStatuses, runningParameter, -1);
+    }
+
+    public EnvironmentTestDto awaitNew(EnvironmentTestDto entity, EnvironmentStatus desiredStatuses,
+            RunningParameter runningParameter, long pollingInterval) {
+        checkShutdown();
+
+        if (!getExceptionMap().isEmpty() && runningParameter.isSkipOnFail()) {
+            Log.await(LOGGER, String.format("Should be skipped beacause of previous error. await [%s]", desiredStatuses));
+            return entity;
+        }
+        String key = getKeyForAwait(entity, entity.getClass(), runningParameter);
+        EnvironmentTestDto awaitEntity = get(key);
+        Log.await(LOGGER, String.format("%s for %s", key, desiredStatuses));
+        try {
+            if (awaitEntity == null) {
+                throw new RuntimeException("Key provided but no result in resource map, key=" + key);
+            }
+
+            statuses.putAll(environmentWaitService.waitWithTimeout(any(EnvironmentCreation.class),
+                    any(EnvironmentWaitObject.class),
+                    pollingInterval,
+                    anyInt(),
+                    anyInt()));
+
             if (!desiredStatuses.equals(EnvironmentStatus.ARCHIVED)) {
                 awaitEntity.refresh(getTestContext(), null);
             }

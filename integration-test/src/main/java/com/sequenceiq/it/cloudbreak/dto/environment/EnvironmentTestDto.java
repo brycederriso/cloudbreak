@@ -305,6 +305,14 @@ public class EnvironmentTestDto
         return getTestContext().await(this, status, runningParameter);
     }
 
+    public EnvironmentTestDto awaitNew(EnvironmentStatus status) {
+        return awaitNew(status, emptyRunningParameter());
+    }
+
+    public EnvironmentTestDto awaitNew(EnvironmentStatus status, RunningParameter runningParameter) {
+        return getTestContext().awaitNew(this, status, runningParameter);
+    }
+
     @Override
     public int order() {
         return order;
